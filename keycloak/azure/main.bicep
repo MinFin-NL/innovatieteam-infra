@@ -30,7 +30,7 @@ param keycloakImage string
 @description('Public https hostname for Keycloak. Empty on first deploy; set after you know the FQDN.')
 param keycloakHostname string = ''
 
-@description('Name of an existing Container Apps Environment to reuse (e.g. cae-invulhulp-inno-d). Empty = create a dedicated cae-${prefix}.')
+@description('Name of an existing Container Apps Environment to reuse (e.g. cae-invulhulp-inno-d). Empty = create a dedicated cae-<prefix>.')
 param existingCaeName string = ''
 
 @description('Name of the Keycloak Container App.')
