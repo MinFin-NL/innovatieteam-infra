@@ -58,6 +58,23 @@ param postgresImage string = 'postgres:16'
 @description('Postgres admin username.')
 param postgresAdminUser string = 'kcadmin'
 
+@description('''Suffix for the Postgres revision. Changing it forces a brand-new
+revision -> fresh EmptyDir -> initdb re-runs with the *current* db password.
+The pipeline passes the commit SHA, so every deploy recreates an empty Postgres
+that matches the latest Key Vault password (the official postgres image only
+honours POSTGRES_PASSWORD at first init, so a long-lived volume can otherwise
+drift out of sync with a rotated password). Empty = keep the auto-generated
+suffix (no forced re-init).''')
+param postgresRevisionSuffix string = ''
+
+@description('''Suffix for the Keycloak revision. Mirrors postgresRevisionSuffix:
+changing it forces a brand-new Keycloak revision, so Keycloak restarts and
+re-runs --import-realm against the (freshly re-initialised) Postgres. The
+pipeline passes a per-pass value so Keycloak rolls in lockstep with Postgres
+instead of drifting against an empty database. Empty = keep the auto-generated
+suffix (no forced restart).''')
+param keycloakRevisionSuffix string = ''
+
 @secure()
 param keycloakAdminPassword string
 
@@ -166,7 +183,12 @@ resource postgres 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'db-pw', keyVaultUrl: secDb.properties.secretUri, identity: uami.id }
       ]
     }
-    template: {
+    // union() omits revisionSuffix entirely when it's empty (the default), so a
+    // bare deploy keeps the auto-generated suffix. When postgresRevisionSuffix is
+    // set (the pipeline passes the commit SHA) it forces a new revision -> fresh
+    // EmptyDir -> initdb re-runs with the current Key Vault password. That is the
+    // mechanism for "delete the old Postgres and create a complete fresh one".
+    template: union(empty(postgresRevisionSuffix) ? {} : { revisionSuffix: postgresRevisionSuffix }, {
       containers: [
         {
           name: 'postgres'
@@ -195,7 +217,7 @@ resource postgres 'Microsoft.App/containerApps@2024-03-01' = {
       // Exactly one replica, always on. >1 would each get a separate empty disk;
       // scale-to-zero would drop the database between requests.
       scale: { minReplicas: 1, maxReplicas: 1 }
-    }
+    })
   }
 }
 
@@ -233,7 +255,11 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'db-pw', keyVaultUrl: secDb.properties.secretUri, identity: uami.id }
       ]
     }
-    template: {
+    // Same union() trick as Postgres: when keycloakRevisionSuffix is set (the
+    // pipeline passes a per-pass commit SHA) it forces a new revision so Keycloak
+    // restarts and re-imports the realms against the fresh Postgres. Empty keeps
+    // the auto-generated suffix.
+    template: union(empty(keycloakRevisionSuffix) ? {} : { revisionSuffix: keycloakRevisionSuffix }, {
       containers: [
         {
           name: 'keycloak'
@@ -280,7 +306,7 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
       // sticky sessions or Keycloak's distributed cache breaks logins. Scale up
       // only after configuring clustering.
       scale: { minReplicas: 1, maxReplicas: 1 }
-    }
+    })
   }
 }
 

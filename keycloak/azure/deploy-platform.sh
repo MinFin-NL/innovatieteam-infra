@@ -8,9 +8,17 @@
 #     KC_ADMIN_PASSWORD   Keycloak admin password
 #     PG_ADMIN_PASSWORD   Postgres admin password
 #   Optional env:
-#     RG                  resource group     (default: rg-platform)
-#     LOCATION            region             (default: westeurope)
-#     KEYCLOAK_HOSTNAME   https URL to pin    (empty on first deploy)
+#     RG                       resource group     (default: rg-platform)
+#     LOCATION                 region             (default: westeurope)
+#     KEYCLOAK_HOSTNAME        https URL to pin    (empty on first deploy)
+#     POSTGRES_REVISION_SUFFIX set to a new value (e.g. a date/SHA) to force a
+#                              fresh, empty Postgres revision re-initialised with
+#                              the current db password. Leave empty to keep data.
+#     KEYCLOAK_REVISION_SUFFIX same idea for Keycloak: a new value forces a fresh
+#                              revision so Keycloak restarts and re-runs
+#                              --import-realm. Use a *different* value on the two
+#                              hostname-pinning runs, or Container Apps rejects the
+#                              reused suffix. Leave empty to keep the auto suffix.
 #
 # Usage:
 #   export ACR=myregistry KC_ADMIN_PASSWORD=... PG_ADMIN_PASSWORD=...
@@ -41,6 +49,8 @@ az deployment group create -g "$RG" -n keycloak-platform -f azure/main.bicep \
   -p acrName="$ACR" \
      keycloakImage="${ACR}.azurecr.io/keycloak:26.1" \
      keycloakHostname="$HOSTNAME" \
+     postgresRevisionSuffix="${POSTGRES_REVISION_SUFFIX:-}" \
+     keycloakRevisionSuffix="${KEYCLOAK_REVISION_SUFFIX:-}" \
      keycloakAdminPassword="$KC_ADMIN_PASSWORD" \
      postgresAdminPassword="$PG_ADMIN_PASSWORD" \
   -o none

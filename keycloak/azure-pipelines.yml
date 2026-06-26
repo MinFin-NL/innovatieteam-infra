@@ -125,7 +125,21 @@ stages:
                 IMAGE_REF="$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
                 echo "Deploying image: $IMAGE_REF"
 
+                # Container Apps revision names are '<app>--<suffix>' capped at 64
+                # chars, so use a short SHA rather than the full 40-char one.
+                SHORT_SHA="${IMAGE_TAG:0:12}"
+
+                # Force a fresh revision of BOTH apps on every deploy: Postgres
+                # re-inits an empty DB (revisionSuffix changes) and Keycloak
+                # restarts to re-run --import-realm against it, in lockstep.
+                # Postgres' template is identical across the two passes below, so it
+                # reuses one suffix (idempotent — re-inits once per commit). Keycloak's
+                # template differs (the hostname is pinned on pass 2) and Container
+                # Apps rejects reusing a suffix with changed content, so Keycloak gets
+                # a per-pass suffix.
                 deploy() {  # deploy [hostname]
+                  local host="${1:-}"
+                  local kcPass; [[ -z "$host" ]] && kcPass="p1" || kcPass="p2"
                   az deployment group create \
                     -g "$RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
                     -f azure/main.bicep \
@@ -135,7 +149,9 @@ stages:
                        postgresAppName="$POSTGRES_APP_NAME" \
                        existingCaeName="$CONTAINER_APP_ENV" \
                        keycloakImage="$IMAGE_REF" \
-                       keycloakHostname="${1:-}" \
+                       postgresRevisionSuffix="$SHORT_SHA" \
+                       keycloakRevisionSuffix="${SHORT_SHA}-${kcPass}" \
+                       keycloakHostname="$host" \
                        keycloakAdminPassword="$KC_ADMIN_PASSWORD" \
                        postgresAdminPassword="$PG_ADMIN_PASSWORD" \
                     -o none
