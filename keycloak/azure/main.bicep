@@ -43,6 +43,9 @@ param keycloakImage string
 @description('Public https hostname for Keycloak. Empty on first deploy; set after you know the FQDN.')
 param keycloakHostname string = ''
 
+@description('Public URL of the invulhulp frontend (e.g. https://ca-invulhulp-frontend-inno-d.<env>.azurecontainerapps.io). The Keycloak entrypoint renders it into the findocs realm import (redirect URIs / web origins / logout), replacing the __PUBLIC_URL__ sentinel. Empty leaves the sentinel (fine for dev).')
+param publicUrl string = ''
+
 @description('Name of an existing Container Apps Environment to reuse (e.g. cae-invulhulp-inno-d). Empty = create a dedicated cae-<prefix>.')
 param existingCaeName string = ''
 
@@ -80,6 +83,10 @@ param keycloakAdminPassword string
 
 @secure()
 param postgresAdminPassword string
+
+@description('Secret for the findocs-bff confidential client. The Keycloak entrypoint renders it into the realm import at boot (replacing the dev placeholder), so it never lives in the realm JSON. Must equal invulhulp\'s OIDC_CLIENT_SECRET.')
+@secure()
+param findocsBffClientSecret string
 
 // Key Vault names are capped at 24 chars. 'kv-' + prefix + '-' + the 13-char
 // uniqueString overflows for a long prefix (e.g. 'keycloak' = 25), so truncate.
@@ -138,6 +145,12 @@ resource secDb 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: kv
   name: 'postgres-admin-password'
   properties: { value: postgresAdminPassword }
+}
+
+resource secBff 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: kv
+  name: 'findocs-bff-client-secret'
+  properties: { value: findocsBffClientSecret }
 }
 
 // Reuse an existing Container Apps Environment (e.g. the invulhulp one) when
@@ -253,6 +266,7 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
       secrets: [
         { name: 'kc-admin-pw', keyVaultUrl: secAdmin.properties.secretUri, identity: uami.id }
         { name: 'db-pw', keyVaultUrl: secDb.properties.secretUri, identity: uami.id }
+        { name: 'bff-secret', keyVaultUrl: secBff.properties.secretUri, identity: uami.id }
       ]
     }
     // Same union() trick as Postgres: when keycloakRevisionSuffix is set (the
@@ -264,7 +278,9 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'keycloak'
           image: keycloakImage
-          command: [ '/opt/keycloak/bin/kc.sh' ]
+          // No command override: the image ENTRYPOINT (docker-entrypoint.sh) renders
+          // the realm templates with the injected client secret, then exec's kc.sh
+          // with these args.
           args: [ 'start', '--optimized', '--import-realm' ]
           resources: { cpu: json('1.0'), memory: '2Gi' }
           env: concat([
@@ -275,6 +291,12 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'KC_DB_URL', value: 'jdbc:postgresql://${postgres.name}:5432/keycloak?sslmode=disable' }
             { name: 'KC_DB_USERNAME', value: postgresAdminUser }
             { name: 'KC_DB_PASSWORD', secretRef: 'db-pw' }
+            // Rendered into the realm import by docker-entrypoint.sh (replaces the
+            // dev placeholder secret). Must match invulhulp's OIDC_CLIENT_SECRET.
+            { name: 'FINDOCS_BFF_CLIENT_SECRET', secretRef: 'bff-secret' }
+            // Invulhulp frontend URL, rendered into the realm redirect URIs by the
+            // entrypoint (replaces __PUBLIC_URL__).
+            { name: 'PUBLIC_URL', value: publicUrl }
             { name: 'KC_BOOTSTRAP_ADMIN_USERNAME', value: 'admin' }
             { name: 'KC_BOOTSTRAP_ADMIN_PASSWORD', secretRef: 'kc-admin-pw' }
             // Container Apps terminates TLS at the ingress and forwards over HTTP.

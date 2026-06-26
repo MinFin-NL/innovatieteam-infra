@@ -39,6 +39,11 @@ services:
       KC_DB_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD}
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN:?set KC_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?set KC_ADMIN_PASSWORD}
+      # Rendered into the realm import by docker-entrypoint.sh (replaces the dev
+      # placeholder secret). Must match the app's OIDC_CLIENT_SECRET.
+      FINDOCS_BFF_CLIENT_SECRET: ${FINDOCS_BFF_CLIENT_SECRET:?set FINDOCS_BFF_CLIENT_SECRET}
+      # Frontend URL rendered into the realm redirect URIs (replaces __PUBLIC_URL__).
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
       # The single public https hostname the browser uses, e.g. https://auth.example.nl
       KC_HOSTNAME: ${KC_HOSTNAME:?e.g. https://auth.example.nl}
       KC_PROXY_HEADERS: xforwarded

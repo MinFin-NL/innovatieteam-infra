@@ -7,6 +7,9 @@
 #     ACR                 ACR name without .azurecr.io (must already exist)
 #     KC_ADMIN_PASSWORD   Keycloak admin password
 #     PG_ADMIN_PASSWORD   Postgres admin password
+#     FINDOCS_BFF_CLIENT_SECRET  findocs-bff client secret (rendered into the realm
+#                                import at boot; must match invulhulp OIDC_CLIENT_SECRET)
+#     PUBLIC_URL          invulhulp frontend URL, rendered into the realm redirect URIs
 #   Optional env:
 #     RG                       resource group     (default: rg-platform)
 #     LOCATION                 region             (default: westeurope)
@@ -33,6 +36,8 @@ LOCATION=${LOCATION:-westeurope}
 : "${ACR:?Set ACR to your container registry name (without .azurecr.io)}"
 : "${KC_ADMIN_PASSWORD:?Set KC_ADMIN_PASSWORD}"
 : "${PG_ADMIN_PASSWORD:?Set PG_ADMIN_PASSWORD}"
+: "${FINDOCS_BFF_CLIENT_SECRET:?Set FINDOCS_BFF_CLIENT_SECRET (must match invulhulp OIDC_CLIENT_SECRET)}"
+: "${PUBLIC_URL:?Set PUBLIC_URL (invulhulp frontend URL for the realm redirect URIs)}"
 HOSTNAME=${KEYCLOAK_HOSTNAME:-}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +58,8 @@ az deployment group create -g "$RG" -n keycloak-platform -f azure/main.bicep \
      keycloakRevisionSuffix="${KEYCLOAK_REVISION_SUFFIX:-}" \
      keycloakAdminPassword="$KC_ADMIN_PASSWORD" \
      postgresAdminPassword="$PG_ADMIN_PASSWORD" \
+     findocsBffClientSecret="$FINDOCS_BFF_CLIENT_SECRET" \
+     publicUrl="$PUBLIC_URL" \
   -o none
 
 FQDN=$(az deployment group show -g "$RG" -n keycloak-platform \

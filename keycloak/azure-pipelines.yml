@@ -19,10 +19,14 @@
 # Keycloak-specific infra (its own Key Vault + Postgres) in that RG.
 #
 # Set up before first run:
-#   - Variable group 'invulhulp-secrets' already provides AZURE_SERVICE_CONNECTION.
+#   - Variable group 'invulhulp-secrets' provides AZURE_SERVICE_CONNECTION and
+#     PUBLIC_URL (the invulhulp frontend URL, rendered into the realm redirect URIs).
 #   - Variable group 'keycloak-secrets' (Pipelines > Library) with:
 #       KC_ADMIN_PASSWORD          (secret) Keycloak bootstrap admin password
 #       PG_ADMIN_PASSWORD          (secret) Postgres admin password
+#       FINDOCS_BFF_CLIENT_SECRET  (secret) findocs-bff client secret. Must match
+#                                  invulhulp's OIDC_CLIENT_SECRET — the entrypoint
+#                                  renders it into the realm import at boot.
 # ---------------------------------------------------------------------------
 
 trigger:
@@ -111,6 +115,8 @@ stages:
               DEPLOYMENT_NAME: $(DEPLOYMENT_NAME)
               KC_ADMIN_PASSWORD: $(KC_ADMIN_PASSWORD)
               PG_ADMIN_PASSWORD: $(PG_ADMIN_PASSWORD)
+              FINDOCS_BFF_CLIENT_SECRET: $(FINDOCS_BFF_CLIENT_SECRET)
+              PUBLIC_URL: $(PUBLIC_URL)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
@@ -154,6 +160,8 @@ stages:
                        keycloakHostname="$host" \
                        keycloakAdminPassword="$KC_ADMIN_PASSWORD" \
                        postgresAdminPassword="$PG_ADMIN_PASSWORD" \
+                       findocsBffClientSecret="$FINDOCS_BFF_CLIENT_SECRET" \
+                       publicUrl="$PUBLIC_URL" \
                     -o none
                 }
 

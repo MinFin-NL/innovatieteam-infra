@@ -21,6 +21,10 @@ RUN /opt/keycloak/bin/kc.sh build
 
 FROM quay.io/keycloak/keycloak:26.1
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
-# Bake every realms/*.json so --import-realm can create them on first boot.
-COPY realms/ /opt/keycloak/data/import/
-ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+# Bake every realms/*.json as a *template*. docker-entrypoint.sh renders them
+# into data/import/ at boot (swapping the dev client secret for the injected
+# FINDOCS_BFF_CLIENT_SECRET) before exec-ing kc.sh — the startup --import-realm
+# path can't substitute env placeholders itself.
+COPY realms/ /opt/keycloak/data/import-templates/
+COPY docker-entrypoint.sh /opt/keycloak/docker-entrypoint.sh
+ENTRYPOINT ["bash", "/opt/keycloak/docker-entrypoint.sh"]
