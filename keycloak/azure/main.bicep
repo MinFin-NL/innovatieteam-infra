@@ -4,9 +4,22 @@
 // Provisions, in one resource group (rg-platform):
 //   - User-assigned managed identity (pulls the image + reads Key Vault)
 //   - Key Vault (admin password, db password — pilot client secrets go here too)
-//   - PostgreSQL Flexible Server + 'keycloak' database
+//   - PostgreSQL *container* app (internal TCP ingress, single replica)
 //   - Container Apps Environment
 //   - Keycloak Container App (external HTTPS ingress, single replica)
+//
+// Why a Postgres container instead of a managed Flexible Server: the CCoE
+// "Allowed Resource Types" guardrail (assigned at mgmt group minfin-mg100)
+// denies Microsoft.DBforPostgreSQL/flexibleServers — and also the Azure Files
+// mount type (App/managedEnvironments/storages) and Sql firewall rules. With a
+// non-VNet environment there's no in-policy durable DB option, so for the pilot
+// Postgres runs as a container on an EmptyDir volume.
+//
+// !! EPHEMERAL DATA !!  EmptyDir lives only as long as the replica. A new
+// revision (every deploy), a scale event, or platform maintenance gives Postgres
+// a fresh, empty disk. Keycloak rebuilds its schema and re-imports the baked-in
+// realms on each boot (--import-realm), so config-as-code survives — but
+// runtime-created users and sessions do NOT. Fine for a demo, not for keeps.
 //
 // The Keycloak image is the custom one built from ../Dockerfile (it bakes the
 // realm JSONs). Push it to ACR first, then pass acrName + keycloakImage.
@@ -36,6 +49,12 @@ param existingCaeName string = ''
 @description('Name of the Keycloak Container App.')
 param appName string = 'keycloak'
 
+@description('Name of the Postgres Container App. Keycloak reaches it at this name over the environment-internal network.')
+param postgresAppName string = 'postgres'
+
+@description('Postgres container image. Pulled from Docker Hub by default; point at an ACR mirror if you hit pull limits.')
+param postgresImage string = 'postgres:16'
+
 @description('Postgres admin username.')
 param postgresAdminUser string = 'kcadmin'
 
@@ -46,7 +65,6 @@ param keycloakAdminPassword string
 param postgresAdminPassword string
 
 var kvName = 'kv-${prefix}-${uniqueString(resourceGroup().id)}'
-var pgName = 'psql-${prefix}-${uniqueString(resourceGroup().id)}'
 
 resource uami 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-keycloak'
@@ -102,33 +120,6 @@ resource secDb 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   properties: { value: postgresAdminPassword }
 }
 
-resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview' = {
-  name: pgName
-  location: location
-  sku: { name: 'Standard_B1ms', tier: 'Burstable' }
-  properties: {
-    version: '16'
-    administratorLogin: postgresAdminUser
-    administratorLoginPassword: postgresAdminPassword
-    storage: { storageSizeGB: 32 }
-    backup: { backupRetentionDays: 7, geoRedundantBackup: 'Disabled' }
-    highAvailability: { mode: 'Disabled' }
-  }
-}
-
-resource pgDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-06-01-preview' = {
-  parent: pg
-  name: 'keycloak'
-}
-
-// Allow Azure-internal services (the Container App) to reach Postgres.
-// 0.0.0.0-0.0.0.0 is the documented "allow Azure services" rule, not the public internet.
-resource pgFw 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-06-01-preview' = {
-  parent: pg
-  name: 'AllowAzureServices'
-  properties: { startIpAddress: '0.0.0.0', endIpAddress: '0.0.0.0' }
-}
-
 // Reuse an existing Container Apps Environment (e.g. the invulhulp one) when
 // existingCaeName is set; otherwise stand up a dedicated one. Either way a
 // single CAE can host both internal (invulhulp) and external (Keycloak) apps.
@@ -143,6 +134,67 @@ resource newCae 'Microsoft.App/managedEnvironments@2024-03-01' = if (empty(exist
 }
 
 var caeId = empty(existingCaeName) ? newCae.id : existingCae.id
+
+// Postgres as a container, reachable only inside the environment over TCP:5432.
+// The official image creates the user/db on first init from POSTGRES_*; the
+// password comes from Key Vault via the shared managed identity. Data lives on
+// an EmptyDir volume — ephemeral by design (see the header note).
+resource postgres 'Microsoft.App/containerApps@2024-03-01' = {
+  name: postgresAppName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${uami.id}': {} }
+  }
+  properties: {
+    managedEnvironmentId: caeId
+    configuration: {
+      activeRevisionsMode: 'Single'
+      // Internal TCP ingress: other apps in the environment connect to
+      // '<postgresAppName>:5432'. Not reachable from the public internet.
+      ingress: {
+        external: false
+        transport: 'tcp'
+        targetPort: 5432
+        exposedPort: 5432
+        traffic: [ { weight: 100, latestRevision: true } ]
+      }
+      secrets: [
+        { name: 'db-pw', keyVaultUrl: secDb.properties.secretUri, identity: uami.id }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'postgres'
+          image: postgresImage
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'POSTGRES_USER', value: postgresAdminUser }
+            { name: 'POSTGRES_PASSWORD', secretRef: 'db-pw' }
+            { name: 'POSTGRES_DB', value: 'keycloak' }
+            // Keep PGDATA in a subdir of the mount so initdb owns a clean dir.
+            { name: 'PGDATA', value: '/var/lib/postgresql/data/pgdata' }
+          ]
+          volumeMounts: [
+            { volumeName: 'pgdata', mountPath: '/var/lib/postgresql/data' }
+          ]
+          probes: [
+            { type: 'Liveness', tcpSocket: { port: 5432 }, initialDelaySeconds: 30, periodSeconds: 30 }
+            { type: 'Readiness', tcpSocket: { port: 5432 }, initialDelaySeconds: 10, periodSeconds: 10 }
+          ]
+        }
+      ]
+      // EmptyDir = node-local scratch tied to the replica's lifetime.
+      volumes: [
+        { name: 'pgdata', storageType: 'EmptyDir' }
+      ]
+      // Exactly one replica, always on. >1 would each get a separate empty disk;
+      // scale-to-zero would drop the database between requests.
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
 
 // Hostname is conditional: strict + pinned once you know the FQDN; otherwise
 // Keycloak derives it from the forwarded request headers (fine for first boot).
@@ -188,7 +240,10 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('1.0'), memory: '2Gi' }
           env: concat([
             { name: 'KC_DB', value: 'postgres' }
-            { name: 'KC_DB_URL', value: 'jdbc:postgresql://${pg.properties.fullyQualifiedDomainName}:5432/keycloak?sslmode=require' }
+            // Reach the Postgres container by its app name over the env-internal
+            // network. sslmode=disable: the container serves plain TCP and the
+            // traffic never leaves the environment.
+            { name: 'KC_DB_URL', value: 'jdbc:postgresql://${postgres.name}:5432/keycloak?sslmode=disable' }
             { name: 'KC_DB_USERNAME', value: postgresAdminUser }
             { name: 'KC_DB_PASSWORD', secretRef: 'db-pw' }
             { name: 'KC_BOOTSTRAP_ADMIN_USERNAME', value: 'admin' }
@@ -228,4 +283,4 @@ resource keycloak 'Microsoft.App/containerApps@2024-03-01' = {
 
 output keycloakFqdn string = keycloak.properties.configuration.ingress.fqdn
 output keyVaultName string = kv.name
-output postgresFqdn string = pg.properties.fullyQualifiedDomainName
+output postgresHost string = '${postgres.name}:5432'

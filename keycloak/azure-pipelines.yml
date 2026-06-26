@@ -49,6 +49,8 @@ variables:
     value: keycloak
   - name: APP_NAME
     value: ca-keycloak-inno-d
+  - name: POSTGRES_APP_NAME
+    value: ca-postgres-inno-d
   - name: DEPLOYMENT_NAME
     value: keycloak-platform
   # Working dir = keycloak/ so Dockerfile, realms/ and providers/ are the build context.
@@ -105,6 +107,7 @@ stages:
               LOCATION: $(LOCATION)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
               APP_NAME: $(APP_NAME)
+              POSTGRES_APP_NAME: $(POSTGRES_APP_NAME)
               DEPLOYMENT_NAME: $(DEPLOYMENT_NAME)
               KC_ADMIN_PASSWORD: $(KC_ADMIN_PASSWORD)
               PG_ADMIN_PASSWORD: $(PG_ADMIN_PASSWORD)
@@ -129,6 +132,7 @@ stages:
                     -p acrName="$ACR_NAME" \
                        prefix="keycloak" \
                        appName="$APP_NAME" \
+                       postgresAppName="$POSTGRES_APP_NAME" \
                        existingCaeName="$CONTAINER_APP_ENV" \
                        keycloakImage="$IMAGE_REF" \
                        keycloakHostname="${1:-}" \
