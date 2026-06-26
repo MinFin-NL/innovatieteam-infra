@@ -64,7 +64,10 @@ param keycloakAdminPassword string
 @secure()
 param postgresAdminPassword string
 
-var kvName = 'kv-${prefix}-${uniqueString(resourceGroup().id)}'
+// Key Vault names are capped at 24 chars. 'kv-' + prefix + '-' + the 13-char
+// uniqueString overflows for a long prefix (e.g. 'keycloak' = 25), so truncate.
+// uniqueString is deterministic per RG, so the (truncated) name stays stable.
+var kvName = take('kv-${prefix}-${uniqueString(resourceGroup().id)}', 24)
 
 resource uami 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-keycloak'
