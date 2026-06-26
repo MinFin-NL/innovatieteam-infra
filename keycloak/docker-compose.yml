@@ -1,0 +1,67 @@
+# Standalone Keycloak — shared identity provider for multiple pilots.
+#
+# This stack is intentionally self-contained: it has its own Postgres and its
+# own Docker network (`keycloak-shared`). Pilot apps attach to that network and
+# talk to Keycloak at http://keycloak:8080 (back-channel), while browsers use
+# http://localhost:8081 (front-channel). Lift this folder into its own git repo
+# whenever you want — nothing here depends on the findocs app.
+#
+#   Start:  docker compose up -d
+#   Admin:  http://localhost:8081  (admin / admin by default)
+#
+name: keycloak-shared
+
+services:
+  keycloak-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
+    volumes:
+      - keycloak_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [keycloak]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    command: start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      # Front-channel base URL (issuer, /authorize, /logout) — what the browser sees.
+      KC_HOSTNAME: http://localhost:8081
+      # Let back-channel URLs (token, jwks) follow the request host, so an app
+      # backend on the shared network reaches them at http://keycloak:8080.
+      # This is the fix for the classic "issuer mismatch" behind Docker.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      # Welcome page uses the NLDS theme too (can't be set per-realm; needs this SPI option).
+      KC_SPI_THEME_WELCOME_THEME: nl-design-system
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./realms:/opt/keycloak/data/import
+      # NL Design System theme (MinBZK/keycloak-theme) — prebuilt JAR in providers/.
+      - ./providers:/opt/keycloak/providers
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks: [keycloak]
+
+networks:
+  keycloak:
+    name: keycloak-shared
+    driver: bridge
+
+volumes:
+  keycloak_db:

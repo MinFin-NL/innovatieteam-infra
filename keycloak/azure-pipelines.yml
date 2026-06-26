@@ -1,0 +1,153 @@
+# ---------------------------------------------------------------------------
+# Azure DevOps pipeline for the central Keycloak platform.
+#
+# Same shape as ../../invulhulp/azure-pipelines.yml (self-hosted pool, variable
+# group, AzureCLI@2 tasks), but Keycloak deploys differently from a plain
+# Container App: we build the *custom* image (it bakes realms/ + the NLDS theme),
+# then let Bicep (azure/main.bicep) own the infra — Key Vault, Postgres, the
+# Container Apps Env and the Keycloak app itself.
+#
+# Two stages:
+#   Build   — az acr build the keycloak image into ACR (tagged with the commit)
+#   Deploy  — az deployment group create (Bicep), then re-deploy with the FQDN
+#             pinned so KC_HOSTNAME_STRICT is on (the two-pass trick that
+#             deploy-platform.sh does by hand).
+#
+# Deploys into the SAME resource group as invulhulp (rg-invulhulp-inno-d):
+# reuses that ACR and the existing Container Apps Env (cae-invulhulp-inno-d),
+# and follows the ca-{service}-inno-d naming. The Bicep still creates the
+# Keycloak-specific infra (its own Key Vault + Postgres) in that RG.
+#
+# Set up before first run:
+#   - Variable group 'invulhulp-secrets' already provides AZURE_SERVICE_CONNECTION.
+#   - Variable group 'keycloak-secrets' (Pipelines > Library) with:
+#       KC_ADMIN_PASSWORD          (secret) Keycloak bootstrap admin password
+#       PG_ADMIN_PASSWORD          (secret) Postgres admin password
+# ---------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - keycloak/*
+
+pool:
+  name: alz-p-mgmt-we-ccoe-pool
+
+variables:
+  - group: invulhulp-secrets   # AZURE_SERVICE_CONNECTION
+  - group: keycloak-secrets    # KC_ADMIN_PASSWORD, PG_ADMIN_PASSWORD
+  - name: RESOURCE_GROUP
+    value: rg-invulhulp-inno-d
+  - name: LOCATION
+    value: westeurope
+  - name: CONTAINER_APP_ENV
+    value: cae-invulhulp-inno-d
+  - name: IMAGE_NAME
+    value: keycloak
+  - name: APP_NAME
+    value: ca-keycloak-inno-d
+  - name: DEPLOYMENT_NAME
+    value: keycloak-platform
+  # Working dir = keycloak/ so Dockerfile, realms/ and providers/ are the build context.
+  - name: WORKING_DIR
+    value: keycloak
+
+stages:
+  - stage: Build
+    displayName: Build and push Keycloak image
+    jobs:
+      - job: Build
+        displayName: az acr build (bakes realms + NLDS theme)
+        steps:
+          - task: AzureCLI@2
+            displayName: Build and push image to ACR
+            env:
+              IMAGE_NAME: $(IMAGE_NAME)
+              IMAGE_TAG: $(Build.SourceVersion)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              WORKING_DIR: $(WORKING_DIR)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(WORKING_DIR)
+              inlineScript: |
+                set -euo pipefail
+                ACR_NAME=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv)
+                if [[ -z "$ACR_NAME" ]]; then
+                  echo "##[error]No ACR found in $RESOURCE_GROUP. Create one (az acr create) first." >&2
+                  exit 1
+                fi
+                echo "Using ACR: $ACR_NAME"
+                # ACR Tasks builds remotely — no Docker needed on the agent. The
+                # commit tag is immutable; :latest tracks the tip of main.
+                az acr build -r "$ACR_NAME" \
+                  -t "$IMAGE_NAME:$IMAGE_TAG" \
+                  -t "$IMAGE_NAME:latest" \
+                  -f Dockerfile .
+
+  - stage: Deploy
+    displayName: Deploy Keycloak platform (Bicep)
+    dependsOn: Build
+    jobs:
+      - job: Deploy
+        displayName: az deployment group create + pin hostname
+        steps:
+          - task: AzureCLI@2
+            displayName: Deploy infra + Keycloak
+            env:
+              IMAGE_NAME: $(IMAGE_NAME)
+              IMAGE_TAG: $(Build.SourceVersion)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              LOCATION: $(LOCATION)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              APP_NAME: $(APP_NAME)
+              DEPLOYMENT_NAME: $(DEPLOYMENT_NAME)
+              KC_ADMIN_PASSWORD: $(KC_ADMIN_PASSWORD)
+              PG_ADMIN_PASSWORD: $(PG_ADMIN_PASSWORD)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(WORKING_DIR)
+              inlineScript: |
+                set -euo pipefail
+                az group create -n "$RESOURCE_GROUP" -l "$LOCATION" -o none
+
+                ACR_NAME=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv)
+                ACR_LOGIN_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)
+                IMAGE_REF="$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+                echo "Deploying image: $IMAGE_REF"
+
+                deploy() {  # deploy [hostname]
+                  az deployment group create \
+                    -g "$RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
+                    -f azure/main.bicep \
+                    -p acrName="$ACR_NAME" \
+                       prefix="keycloak" \
+                       appName="$APP_NAME" \
+                       existingCaeName="$CONTAINER_APP_ENV" \
+                       keycloakImage="$IMAGE_REF" \
+                       keycloakHostname="${1:-}" \
+                       keycloakAdminPassword="$KC_ADMIN_PASSWORD" \
+                       postgresAdminPassword="$PG_ADMIN_PASSWORD" \
+                    -o none
+                }
+
+                # Pass 1: deploy (derives hostname from forwarded headers on first
+                # boot — KC_HOSTNAME_STRICT=false).
+                deploy ""
+
+                FQDN=$(az deployment group show -g "$RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
+                        --query properties.outputs.keycloakFqdn.value -o tsv)
+                echo "Keycloak FQDN: https://$FQDN"
+
+                # Pass 2: re-deploy with the hostname pinned so the issuer is
+                # stable (KC_HOSTNAME_STRICT=true). Idempotent on later runs.
+                deploy "https://$FQDN"
+
+                echo "##vso[task.setvariable variable=KEYCLOAK_URL]https://$FQDN"
+                echo "Keycloak is live at https://$FQDN"

@@ -1,0 +1,62 @@
+# Production-mode Keycloak — parity with the Azure Container Apps deployment.
+#
+# Use this on a plain VM, or locally to test the production config before
+# shipping to Container Apps. Differences from docker-compose.yml (dev):
+#   - builds the custom image (Dockerfile) so realms are baked + server is built
+#   - runs `start --optimized` instead of `start-dev`
+#   - single public hostname via KC_HOSTNAME (no KC_HOSTNAME_BACKCHANNEL_DYNAMIC)
+#   - KC_PROXY_HEADERS=xforwarded — assumes TLS terminates at a reverse proxy
+#
+# All secrets/hostnames come from the environment; nothing has a dev default.
+#
+name: keycloak-prod
+
+services:
+  keycloak-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD}
+    volumes:
+      - keycloak_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [keycloak]
+
+  keycloak:
+    build:
+      context: .
+      dockerfile: Dockerfile   # bakes realms/ for --import-realm
+    command: ["start", "--optimized", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN:?set KC_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?set KC_ADMIN_PASSWORD}
+      # The single public https hostname the browser uses, e.g. https://auth.example.nl
+      KC_HOSTNAME: ${KC_HOSTNAME:?e.g. https://auth.example.nl}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      # NLDS welcome page (login/account themes come from the imported realm config).
+      KC_SPI_THEME_WELCOME_THEME: nl-design-system
+    ports:
+      - "8080:8080"   # put a TLS-terminating reverse proxy in front of this
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks: [keycloak]
+
+networks:
+  keycloak:
+    name: keycloak-shared
+    driver: bridge
+
+volumes:
+  keycloak_db:
